@@ -1,0 +1,70 @@
+# Node dependencies
+node_modules/
+**/node_modules/
+
+# Next.js build output
+.next/
+*/.next/
+out/
+build/
+
+# Local env files (do not commit secrets)
+.env
+.env.*.local
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+logs/
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Editor directories and files
+.vscode/
+.idea/
+*.sublime-workspace
+*.sublime-project
+
+# TypeScript
+*.tsbuildinfo
+
+# Temporary or build folders
+dist/
+coverage/
+.cache/
+.temp/
+tmp/
+temp/
+
+# Uploaded user files (if uploads are generated at runtime)
+public/uploads/
+uploads/
+geotest/public/uploads/
+geotest/uploads/
+
+# Misc
+*.local
+*.swp
+*.pid
+*.seed
+
+# Mac/Unix swap files
+*~
+.*.swp
+
+# Optional: lockfiles for alternative package managers (uncomment if you want to ignore)
+# pnpm-lock.yaml
+# yarn.lock
+
+# Keep track: if files are already committed, they will remain tracked until removed from the index.
+# To untrack an already committed file/folder, run:
+# git rm -r --cached path/to/file-or-folder
