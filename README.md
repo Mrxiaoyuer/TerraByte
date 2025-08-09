@@ -1,1 +1,1 @@
-![TerraByte illustration](assets/terabyte.png)
+![TerraByte illustration](assets/terrabyte.png)
