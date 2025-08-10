@@ -1,3 +1,6 @@
+# CLINE dependencies
+memory-bank/
+
 # Node dependencies
 node_modules/
 **/node_modules/
@@ -68,3 +71,80 @@ geotest/uploads/
 # Keep track: if files are already committed, they will remain tracked until removed from the index.
 # To untrack an already committed file/folder, run:
 # git rm -r --cached path/to/file-or-folder
+
+# -------------------------
+# Additional ignores
+# -------------------------
+
+# Python virtualenvs and caches (commonly created in microservices or local dev)
+venv/
+.venv/
+env/
+.env/           # keep secret env files ignored (already listed above, repeated for clarity)
+ENV/
+.python-version
+pip-wheel-metadata/
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pyc
+
+# Python packaging & test artifacts
+*.egg-info/
+*.egg
+.eggs/
+build/
+dist/
+pip-log.txt
+pip-delete-this-directory.txt
+.python-version
+__pypackages__/
+
+# Python tooling caches
+.mypy_cache/
+.pytest_cache/
+.tox/
+.coverage
+.cache/
+htmlcov/
+
+# Virtualenv created by some IDEs
+venv.bak/
+virtualenv/
+venv-win/
+.venv-win/
+
+# Editor backup/temp files
+*~
+*.swp
+*.swo
+*.bak
+*.orig
+
+# IDE specific
+.vscode/
+.idea/
+*.iml
+
+# Runtime files
+*.pid
+*.seed
+
+# JetBrains
+/out/
+.idea/
+
+# macOS
+.DS_Store
+
+# Windows
+Thumbs.db
+
+# Notes:
+# - If files were already committed, .gitignore won't untrack them automatically.
+#   To untrack files already staged/committed (e.g., accidental git add .), run:
+#     git restore --staged .
+#   to unstage all files, or:
+#     git rm -r --cached path/to/file-or-folder
+#   to remove committed files from the index while keeping them locally.
