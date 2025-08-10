@@ -6,6 +6,7 @@ This README provides a beginner-friendly walkthrough of the `geotest` demo app c
 
 Table of contents
 - Project overview
+- Recent changes (developer notes)
 - Capabilities
 - Prerequisites
 - Quick start (setup & run)
@@ -27,6 +28,34 @@ Project overview
 
 This project is intended as a small wrapper / playground for working with ArcGIS Web SDK in a Next.js app and experimenting with map snapshots, uploads and image caption flows.
 
+Recent changes (developer notes)
+-------------------------------
+These notes reflect recent development work and updates to the demo (important if you pull the repository or continue development).
+
+- Clean-screenshot / caption behavior
+  - The capture and caption flows now temporarily remove or hide the transient results GraphicsLayer and close any open popup before calling `view.takeScreenshot()`. This makes screenshots and caption images free of UI overlays (no blue result markers or open popups).
+  - UI state is restored after the screenshot (best-effort restore).
+
+- Adaptive auto-zoom
+  - `zoomToResults` behavior was added so search results are framed automatically:
+    - Single result: center + sensible zoom.
+    - Multiple results: compute a bounding extent and call `view.goTo({ target: extent, padding })` to frame all locations.
+
+- TypeScript dev types
+  - Added `@types/react-dom` as a dev dependency to resolve TypeScript/Next import type errors. If you run into TS errors related to CSS imports from third-party packages, see the troubleshooting section below.
+
+- Memory bank & documentation
+  - The project's memory-bank (internal documentation files under memory-bank/) was updated to reflect the recent changes (projectbrief, activeContext, techContext, systemPatterns, progress, productContext).
+
+- .gitignore & accidental add fix
+  - `.gitignore` was updated to include Python virtualenvs, caches, editor temp files, and other common unnecessary artifacts.
+  - If you accidentally ran `git add .` and staged unwanted files (venvs, caches, etc.), run:
+    - git restore --staged .
+    - Then commit the desired changes.
+  - If files were already committed and you need to remove them from the repo while keeping them locally:
+    - git rm -r --cached path/to/file-or-folder
+    - git commit -m "Remove sensitive/unnecessary files from repo and update .gitignore"
+
 Capabilities
 ------------
 - Render ArcGIS MapView (satellite basemap) in a Next.js client component.
@@ -34,8 +63,6 @@ Capabilities
 - Store the screenshot data URL in a React context (ImageContext) for other pages/components to consume.
 - POST uploaded screenshots to `/api/upload` (server-side route included).
 - Request captions for screenshots via `fetchCaption` (simple helper in `lib/actions.ts`).
-
-Note: Some more advanced features (area cropping, multi-stage screenshot fallbacks and a big in-app debug overlay) were present previously; the current version is intentionally simplified for readability. Those features can be reintroduced if needed.
 
 Prerequisites
 -------------
@@ -45,9 +72,8 @@ Prerequisites
 
 Quick start (setup & run)
 -------------------------
-1. Open a terminal in the `demos/geotest` directory:
-   - If you're at the repository root, run:
-     cd geotest
+1. From repository root open terminal and change into the demo:
+   cd geotest
 
 2. Install dependencies:
    npm install
@@ -65,8 +91,6 @@ Scripts available (from package.json)
 
 Project structure (top-level important files and directories)
 -------------------------------------------------------------
-(This is a short, human-oriented tree — not every file is listed.)
-
 - app/
   - layout.tsx        — Next.js app layout (global wrappers)
   - page.tsx          — main page that renders MapDisplay and other controls
@@ -84,9 +108,10 @@ Project structure (top-level important files and directories)
   - types.ts          — any shared TypeScript types
 - public/
   - uploads/          — server-side uploaded images are stored here (local dev)
+- memory-bank/        — project documentation & session memory files (developer-only)
 - package.json        — dependencies and scripts
 - tsconfig.json       — TypeScript configuration
-- next.config.mjs     — Next.js configuration (project-specific flags)
+- next.config.mjs     — Next.js configuration
 
 Key files & components explained
 --------------------------------
@@ -95,12 +120,13 @@ components/map-display.tsx
 - Client-side React component that dynamically imports the ArcGIS modules at runtime.
 - Initializes `Map` and `MapView`, mounts to a container div, and exposes a "Capture" button.
 - Capture flow:
-  1. Calls `view.takeScreenshot({ quality: 0.9 })`.
-  2. Normalizes the screenshot result into a base64 data URL (handles strings, `.data`, `.dataUrl`, or Blob shapes).
-  3. Stores the data URL in `ImageContext` for other consumers.
-  4. Optionally POSTs the screenshot to `/api/upload`.
-  5. Calls `fetchCaption(dataUrl)` which attempts to obtain a caption from backend code (see `lib/actions.ts`).
-  6. Triggers a download using a Blob and object URL fallback.
+  1. Temporarily removes/hides result GraphicsLayer and closes popups.
+  2. Calls `view.takeScreenshot({ quality: 0.9 })`.
+  3. Normalizes the screenshot result into a base64 data URL (handles strings, `.data`, `.dataUrl`, or Blob shapes).
+  4. Stores the data URL in `ImageContext` for other consumers.
+  5. Optionally POSTs the screenshot to `/api/upload`.
+  6. Calls `fetchCaption(dataUrl)` which attempts to obtain a caption from backend code (see `lib/actions.ts`).
+  7. Triggers a download using a Blob and object URL fallback.
 
 contexts/ImageContext.tsx
 - Simple React Context to store the last-captured image's data URL and provide a setter to other components.
@@ -118,34 +144,35 @@ Notable things, warnings & troubleshooting
 - You may encounter a TypeScript error like:
   > Cannot find module '@arcgis/core/assets/esri/themes/light/main.css' or its corresponding type declarations.
 
-  This happens when TypeScript/Next is asked to import raw CSS from a node module without a CSS module declaration. Options to fix:
-  - Add a global `declarations.d.ts` or `global.d.ts` in `geotest` with:
+  Options:
+  - Add a global `declarations.d.ts` or `global.d.ts` with:
     declare module '*.css';
     Then restart your TypeScript server and rebuild.
-  - Alternatively, avoid importing ArcGIS CSS from JS; instead import or copy the needed ArcGIS CSS into your app's global CSS (e.g., add `@import` to `app/globals.css` or include the files via `public/`).
-  - In the simplified `map-display.tsx` we intentionally did not import the ArcGIS theme CSS via JS to avoid the TS error; however ArcGIS controls will look best if their CSS is included. You can add ArcGIS CSS to the global stylesheet or add a `.d.ts` declaration.
+  - Alternatively, import or copy the needed ArcGIS CSS into `app/globals.css`.
+  - In this demo the component avoids importing ArcGIS theme CSS via TS files to reduce friction.
 
-2) ArcGIS library size & bundling
-- `@arcgis/core` is a relatively large library. To avoid bundling it on the server, the component dynamically imports ArcGIS modules (`import("@arcgis/core/Map")`) and the component is a client component ("use client") so the heavy code runs in the browser.
-
-3) Screenshot reliability
-- `view.takeScreenshot()` works in most cases but may fail in some browsers or for very large view sizes. Previous versions of this component included multi-stage fallbacks (pixel ratio reduction and manual canvas compositing). Those were removed to simplify the code. If you need robust cross-browser behavior, consider adding a small fallback strategy:
+2) Screenshot reliability
+- `view.takeScreenshot()` works in most cases but may fail in some browsers or for very large view sizes.
+- For robustness, consider:
   - Retry with reduced pixel ratio on failure.
-  - Composite canvases found under the map container into one image as a last resort (watch for CORS-security/tainted canvases).
+  - Composite canvases found under the map container into one image as a last resort (watch for CORS/security regarding tainted canvases).
 
-4) Where uploaded images are stored (dev)
-- The `app/api/upload/route.ts` present in this demo writes uploads into `public/uploads/`. This is fine for local testing, but not for production use. Replace with a cloud storage service (S3, etc.) for production.
+3) Where uploaded images are stored (dev)
+- The `app/api/upload/route.ts` writes uploads into `public/uploads/`. This is fine for local testing, but not for production use. Replace with a cloud storage service for production.
 
-5) TypeScript, CSS imports, and Next.js
-- If you import third-party CSS directly from node_modules, you might need to configure Next.js appropriately or add CSS declarations.
-- If you run into type errors related to CSS imports, add a declaration file as described above.
+4) Git / accidental add notes
+- `.gitignore` was updated to include common venv and tooling files. If you staged unwanted files, unstage them with:
+  git restore --staged .
+- To remove already committed files from the repository index while keeping local copies:
+  git rm -r --cached path/to/file-or-folder
+  git commit -m "Remove sensitive/unnecessary files from repo and update .gitignore"
 
 Development tips & extension points
 ----------------------------------
 - Reintroducing cropped area captures:
   - When you want to allow the user to draw a rectangle/polygon and only capture that area, add the Sketch widget from `@arcgis/core/widgets/Sketch`, capture the drawn geometry, then:
     - Either pass the extent to `view.takeScreenshot({ area: extent })` (supported in many ArcGIS versions).
-    - Or take a full screenshot and then map map screen coordinates -> image pixels and crop the canvas (be careful to calculate pixel scaling when screenshot dimensions differ from viewport).
+    - Or take a full screenshot and then map screen coordinates -> image pixels and crop the canvas (be careful to calculate pixel scaling when screenshot dimensions differ from viewport).
 - Splitting complexity:
   - If you want advanced capture logic and fallbacks, implement the capture logic in a separate helper (e.g., `lib/capture.ts`) and keep `map-display.tsx` focused on UI & wiring.
 - Debugging:
