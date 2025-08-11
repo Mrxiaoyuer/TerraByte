@@ -7,29 +7,31 @@ import { fetchCaption, searchLocations } from "@/lib/actions";
 import "./arcgis-overrides.css";
 
 /**
- * Simplified ArcGIS MapDisplay
+ * Simplified ArcGIS MapDisplay with selection + thumbnail overlay support
  *
- * - Keeps core behavior: display a satellite basemap, allow capturing the current MapView,
- *   upload the captured image, and request an optional caption.
- * - Removed complex fallback branches, large debug overlay, sketch-based cropping, and
- *   multi-stage screenshot logic to make the file easier to read and maintain.
+ * Changes made:
+ * - Results panel is hidden when there are no search results.
+ * - Clicking a result recenters the map, zooms to level 18, and marks that result with a star marker.
+ * - If a thumbnail is available it is added as a picture-marker overlay at the selected location.
+ * - Clicking the star (or selecting a result) opens the popup with the thumbnail as a fallback.
  *
  * Notes:
- * - The component dynamically imports @arcgis/core Map + MapView at runtime.
- * - This version intentionally avoids importing ArcGIS CSS via JS to reduce TypeScript/module errors.
- * - Capture is full-view only (no area cropping).
+ * - Uses inline SVG data URIs for the star marker to avoid adding static assets.
+ * - Keeps dynamic imports of @arcgis/core modules so ArcGIS code runs in the browser.
  */
 
 export default function MapDisplay() {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const viewRef = useRef<any>(null);
   const resultsLayerRef = useRef<any>(null);
+  const overlayGraphicRef = useRef<any>(null); // for thumbnail overlay graphic
   const [loading, setLoading] = useState(false);
   const [resultsLoading, setResultsLoading] = useState(false);
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<any[]>([]);
   const [caption, setCaption] = useState<string | null>(null);
   const [resultsOpen, setResultsOpen] = useState(true);
+  const [selectedId, setSelectedId] = useState<string | number | null>(null);
 
   const imageContext = useContext(ImageContext);
   if (!imageContext) throw new Error("MapDisplay must be used within an ImageContext Provider");
@@ -38,6 +40,12 @@ export default function MapDisplay() {
   const locationsContext = useContext(LocationsContext);
   if (!locationsContext) throw new Error("MapDisplay must be used within a LocationsContext Provider");
   const { locations } = locationsContext;
+
+  // Inline star SVG data URL (small, yellow star)
+  const STAR_SVG_DATA_URL = (() => {
+    const svg = `<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='%23ffd54f'><path d='M12 .587l3.668 7.431L23.6 9.75l-5.8 5.657L19.336 24 12 20.013 4.664 24l1.536-8.593L.4 9.75l7.932-1.732z'/></svg>`;
+    return `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`;
+  })();
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -77,8 +85,6 @@ export default function MapDisplay() {
         await view.when();
         viewRef.current = view;
       } catch (err) {
-        // Keep initialization simple: log to console so developers can inspect in browser.
-        // Avoid storing large debug state in the component to keep the file minimal.
         // eslint-disable-next-line no-console
         console.error("[geotest] MapView init failed:", err);
       }
@@ -88,7 +94,6 @@ export default function MapDisplay() {
 
     return () => {
       try {
-        // destroy the locally-scoped view if it was created
         if (view) {
           try {
             view.destroy();
@@ -96,7 +101,6 @@ export default function MapDisplay() {
           view = null;
         }
 
-        // destroy any view stored on the ref and clear it
         if (viewRef.current) {
           try {
             viewRef.current.destroy();
@@ -104,7 +108,6 @@ export default function MapDisplay() {
           viewRef.current = null;
         }
 
-        // clear container DOM to remove any leftover ArcGIS nodes
         if (containerRef.current) {
           containerRef.current.innerHTML = "";
         }
@@ -121,68 +124,58 @@ export default function MapDisplay() {
       return;
     }
 
-      setLoading(true);
-      let _resultsLayerPreviouslyVisible = false;
-      let _popupWasOpen = false;
-      let _layerWasOnMap = false;
-      let _clearedResultsLayer = false;
+    setLoading(true);
+    let _resultsLayerPreviouslyVisible = false;
+    let _popupWasOpen = false;
+    let _layerWasOnMap = false;
+    let _clearedResultsLayer = false;
+    try {
       try {
-        // Ensure any existing results layer is removed before taking a screenshot.
-        // Use the clearResultsLayer helper which is more robust across SDK versions.
+        await clearResultsLayer();
+        _clearedResultsLayer = true;
+      } catch (e) {
         try {
-          await clearResultsLayer();
-          _clearedResultsLayer = true;
-        } catch (e) {
-          // fallback: try to hide the layer if removal failed
-          try {
-            if (resultsLayerRef.current) {
-              if (typeof resultsLayerRef.current.visible !== "undefined") {
-                _resultsLayerPreviouslyVisible = !!resultsLayerRef.current.visible;
-                resultsLayerRef.current.visible = false;
-              } else if (typeof (resultsLayerRef.current as any).hide === "function") {
-                (resultsLayerRef.current as any).hide();
-              }
-            }
-          } catch {}
-        }
-
-        // Close the popup if open so it won't appear in screenshots
-        try {
-          if (view && view.popup) {
-            if (typeof view.popup.visible !== "undefined") {
-              _popupWasOpen = !!view.popup.visible;
-              try {
-                view.popup.visible = false;
-              } catch {}
-            } else if (typeof (view.popup as any).close === "function") {
-              // close() returns a promise in some SDK versions
-              _popupWasOpen = true;
-              try {
-                (view.popup as any).close();
-              } catch {}
-            } else if (typeof (view.popup as any).hide === "function") {
-              _popupWasOpen = true;
-              try {
-                (view.popup as any).hide();
-              } catch {}
+          if (resultsLayerRef.current) {
+            if (typeof resultsLayerRef.current.visible !== "undefined") {
+              _resultsLayerPreviouslyVisible = !!resultsLayerRef.current.visible;
+              resultsLayerRef.current.visible = false;
+            } else if (typeof (resultsLayerRef.current as any).hide === "function") {
+              (resultsLayerRef.current as any).hide();
             }
           }
-        } catch (e) {
-          // ignore popup toggling errors
-        }
+        } catch {}
+      }
 
-        // Single, simple takeScreenshot call. Rely on ArcGIS API to return a usable image.
-        const result = await view.takeScreenshot({ quality: 0.9 });
+      try {
+        if (view && view.popup) {
+          if (typeof view.popup.visible !== "undefined") {
+            _popupWasOpen = !!view.popup.visible;
+            try {
+              view.popup.visible = false;
+            } catch {}
+          } else if (typeof (view.popup as any).close === "function") {
+            _popupWasOpen = true;
+            try {
+              (view.popup as any).close();
+            } catch {}
+          } else if (typeof (view.popup as any).hide === "function") {
+            _popupWasOpen = true;
+            try {
+              (view.popup as any).hide();
+            } catch {}
+          }
+        }
+      } catch (e) {}
+
+      const result = await view.takeScreenshot({ quality: 0.9 });
       let dataUrl: string | null = null;
 
       if (!result) {
-        // eslint-disable-next-line no-console
         console.warn("[geotest] takeScreenshot returned no result");
         setLoading(false);
         return;
       }
 
-      // result may be an object with .data (string) or other shapes; handle common ones simply
       if (typeof result === "string") {
         dataUrl = result;
       } else if (result && typeof result.data === "string") {
@@ -200,18 +193,15 @@ export default function MapDisplay() {
       }
 
       if (!dataUrl) {
-        // eslint-disable-next-line no-console
         console.warn("[geotest] could not derive dataUrl from screenshot result");
         setLoading(false);
         return;
       }
 
-      // store in context for consumers
       try {
         setImage && setImage(dataUrl);
       } catch {}
 
-      // upload to server (if API present)
       try {
         const uploadRes = await fetch("/api/upload", {
           method: "POST",
@@ -219,25 +209,20 @@ export default function MapDisplay() {
           body: JSON.stringify({ dataUrl, filename: `geotest-${Date.now()}.png` }),
         });
         const json = await uploadRes.json().catch(() => null);
-        // eslint-disable-next-line no-console
         console.log("[geotest] upload response:", json);
       } catch (e) {
-        // eslint-disable-next-line no-console
         console.warn("[geotest] upload failed:", e);
       }
 
-      // optional: request caption from backend
       try {
         const res = await fetchCaption(dataUrl);
         if (res && (res.caption || (res as any).input_caption)) {
           setCaption((res as any).caption || (res as any).input_caption);
         }
       } catch (e) {
-        // eslint-disable-next-line no-console
         console.warn("[geotest] caption request failed:", e);
       }
 
-      // trigger download (simple object URL approach)
       try {
         const base64 = dataUrl.split(",")[1];
         const mime = dataUrl.split(",")[0].split(":")[1].split(";")[0];
@@ -256,14 +241,11 @@ export default function MapDisplay() {
         a.remove();
         setTimeout(() => URL.revokeObjectURL(url), 60000);
       } catch (e) {
-        // eslint-disable-next-line no-console
         console.warn("[geotest] download failed:", e);
       }
-      } catch (err) {
-      // eslint-disable-next-line no-console
+    } catch (err) {
       console.error("[geotest] screenshot failed:", err);
     } finally {
-      // re-add results layer to the map if we removed it (best-effort)
       try {
         if (resultsLayerRef.current && _layerWasOnMap) {
           if (view && view.map && typeof view.map.add === "function") {
@@ -280,11 +262,8 @@ export default function MapDisplay() {
             } catch {}
           }
         }
-      } catch (e) {
-        // ignore
-      }
+      } catch (e) {}
 
-      // restore results layer visibility if we changed it
       try {
         if (resultsLayerRef.current) {
           if (typeof resultsLayerRef.current.visible !== "undefined") {
@@ -293,303 +272,383 @@ export default function MapDisplay() {
             (resultsLayerRef.current as any).show();
           }
         }
-      } catch (e) {
-        // ignore
-      }
+      } catch (e) {}
 
-      // restore popup visibility/state if we changed it
       try {
         if (view && view.popup) {
           if (typeof view.popup.visible !== "undefined") {
             view.popup.visible = _popupWasOpen;
           } else if (_popupWasOpen && typeof (view.popup as any).open === "function") {
             try {
-              // best-effort: attempt to reopen popup (may be no-op if no location)
               (view.popup as any).open();
             } catch {}
           }
         }
-      } catch (e) {
-        // ignore
-      }
+      } catch (e) {}
 
       setLoading(false);
     }
   }
 
-    async function handleRequestCaption() {
-      const view = viewRef.current;
-      if (!view) {
-        // eslint-disable-next-line no-console
-        console.warn("[geotest] view not ready for caption");
-        return;
+  async function handleRequestCaption() {
+    const view = viewRef.current;
+    if (!view) {
+      console.warn("[geotest] view not ready for caption");
+      return;
+    }
+
+    setLoading(true);
+    let _popupWasOpen = false;
+    let _clearedResultsLayer = false;
+    try {
+      try {
+        await clearResultsLayer();
+        _clearedResultsLayer = true;
+      } catch (e) {
+        try {
+          if (resultsLayerRef.current) {
+            if (typeof resultsLayerRef.current.visible !== "undefined") {
+              resultsLayerRef.current.visible = false;
+            } else if (typeof (resultsLayerRef.current as any).hide === "function") {
+              (resultsLayerRef.current as any).hide();
+            }
+          }
+        } catch {}
       }
 
-      setLoading(true);
-      let _popupWasOpen = false;
-      let _clearedResultsLayer = false;
       try {
-        // Ensure results/markers are not visible in the screenshot sent to caption service.
-        try {
-          await clearResultsLayer();
-          _clearedResultsLayer = true;
-        } catch (e) {
-          // fallback: try to hide the layer if removal failed
-          try {
-            if (resultsLayerRef.current) {
-              if (typeof resultsLayerRef.current.visible !== "undefined") {
-                resultsLayerRef.current.visible = false;
-              } else if (typeof (resultsLayerRef.current as any).hide === "function") {
-                (resultsLayerRef.current as any).hide();
-              }
-            }
-          } catch {}
-        }
-
-        // Close/hide popup if open so it won't appear in the screenshot sent to caption service
-        try {
-          if (view && view.popup) {
-            if (typeof view.popup.visible !== "undefined") {
-              _popupWasOpen = !!view.popup.visible;
-              try {
-                view.popup.visible = false;
-              } catch {}
-            } else if (typeof (view.popup as any).close === "function") {
-              _popupWasOpen = true;
-              try {
-                (view.popup as any).close();
-              } catch {}
-            } else if (typeof (view.popup as any).hide === "function") {
-              _popupWasOpen = true;
-              try {
-                (view.popup as any).hide();
-              } catch {}
-            }
-          }
-        } catch (e) {
-          // ignore popup toggling errors
-        }
-
-        // Take screenshot (with markers/popups hidden)
-        const result = await view.takeScreenshot({ quality: 0.9 });
-        let dataUrl: string | null = null;
-
-        if (!result) {
-          // eslint-disable-next-line no-console
-          console.warn("[geotest] takeScreenshot returned no result for caption");
-          setLoading(false);
-          return;
-        }
-
-        if (typeof result === "string") {
-          dataUrl = result;
-        } else if (result && typeof result.data === "string") {
-          dataUrl = result.data;
-        } else if (result && typeof (result as any).dataUrl === "string") {
-          dataUrl = (result as any).dataUrl;
-        } else if (result instanceof Blob || (result && result.data instanceof Blob)) {
-          const blob = result instanceof Blob ? result : result.data;
-          dataUrl = await new Promise<string>((res, rej) => {
-            const reader = new FileReader();
-            reader.onload = () => res(String(reader.result));
-            reader.onerror = (e) => rej(e);
-            reader.readAsDataURL(blob as Blob);
-          });
-        }
-
-        if (!dataUrl) {
-          // eslint-disable-next-line no-console
-          console.warn("[geotest] could not derive dataUrl from screenshot result for caption");
-          setLoading(false);
-          return;
-        }
-
-        // store in context for consumers (keep behavior consistent with Capture)
-        try {
-          setImage && setImage(dataUrl);
-        } catch {}
-
-        // request caption from backend
-        try {
-          const res = await fetchCaption(dataUrl);
-          // eslint-disable-next-line no-console
-          console.log("[geotest] caption service response:", res);
-          if (res && (res.caption || (res as any).input_caption)) {
-            const text = (res as any).caption || (res as any).input_caption;
-            setCaption(text);
-          } else {
-            setCaption("No caption returned");
-          }
-        } catch (e) {
-          // eslint-disable-next-line no-console
-          console.warn("[geotest] caption request failed:", e);
-          setCaption("Caption request failed");
-        }
-      } catch (err) {
-        // eslint-disable-next-line no-console
-        console.error("[geotest] caption flow failed:", err);
-      } finally {
-        // If we cleared the results layer earlier, re-add markers (best-effort) so UI preserves state
-        try {
-          if (_clearedResultsLayer && results && results.length) {
+        if (view && view.popup) {
+          if (typeof view.popup.visible !== "undefined") {
+            _popupWasOpen = !!view.popup.visible;
             try {
-              await addMarkersToMap(results);
+              view.popup.visible = false;
+            } catch {}
+          } else if (typeof (view.popup as any).close === "function") {
+            _popupWasOpen = true;
+            try {
+              (view.popup as any).close();
+            } catch {}
+          } else if (typeof (view.popup as any).hide === "function") {
+            _popupWasOpen = true;
+            try {
+              (view.popup as any).hide();
             } catch {}
           }
-        } catch {}
-
-        // restore popup visibility/state if we changed it
-        try {
-          if (view && view.popup) {
-            if (typeof view.popup.visible !== "undefined") {
-              view.popup.visible = _popupWasOpen;
-            } else if (_popupWasOpen && typeof (view.popup as any).open === "function") {
-              try {
-                (view.popup as any).open();
-              } catch {}
-            }
-          }
-        } catch (e) {
-          // ignore
         }
+      } catch (e) {}
 
+      const result = await view.takeScreenshot({ quality: 0.9 });
+      let dataUrl: string | null = null;
+
+      if (!result) {
+        console.warn("[geotest] takeScreenshot returned no result for caption");
         setLoading(false);
-      }
-    }
-
-    // ----- Search / results helpers -----
-    async function clearResultsLayer() {
-      const view = viewRef.current;
-      if (!view) return;
-      try {
-        if (resultsLayerRef.current) {
-          try {
-            // remove from map
-            view.map && view.map.remove && view.map.remove(resultsLayerRef.current);
-          } catch {}
-          try {
-            resultsLayerRef.current.removeAll && resultsLayerRef.current.removeAll();
-          } catch {}
-          resultsLayerRef.current = null;
-        }
-      } catch (e) {
-        // eslint-disable-next-line no-console
-        console.warn("[geotest] clearResultsLayer failed", e);
-      }
-    }
-
-    async function addMarkersToMap(locations: any[]) {
-      const view = viewRef.current;
-      if (!view || !locations || locations.length === 0) return;
-
-      // dynamic import ArcGIS modules required for markers
-      const [
-        GraphicsLayerModule,
-        GraphicModule,
-        PointModule,
-        SimpleMarkerSymbolModule,
-      ] = await Promise.all([
-        import("@arcgis/core/layers/GraphicsLayer"),
-        import("@arcgis/core/Graphic"),
-        import("@arcgis/core/geometry/Point"),
-        import("@arcgis/core/symbols/SimpleMarkerSymbol"),
-      ]);
-
-      const GraphicsLayer = GraphicsLayerModule.default;
-      const Graphic = (GraphicModule as any).default || (GraphicModule as any);
-      const Point = (PointModule as any).default || (PointModule as any);
-      const SimpleMarkerSymbol = (SimpleMarkerSymbolModule as any).default || (SimpleMarkerSymbolModule as any);
-
-      await clearResultsLayer();
-
-      const layer = new GraphicsLayer();
-      const graphics: any[] = [];
-
-      for (let i = 0; i < locations.length; i++) {
-        const loc = locations[i];
-        const latitude = loc.lat;
-        const longitude = loc.lng;
-
-        const point = new Point({
-          longitude,
-          latitude,
-        });
-
-        const symbol = new SimpleMarkerSymbol({
-          color: [0, 128, 255],
-          outline: { color: [255, 255, 255], width: 1 },
-          size: 10,
-        });
-
-        const graphic = new Graphic({
-          geometry: point,
-          symbol,
-          attributes: {
-            id: loc.id,
-            name: loc.name,
-            address: loc.address,
-          },
-          popupTemplate: {
-            title: loc.name || `Result ${i + 1}`,
-            content: loc.address || `${latitude.toFixed(5)}, ${longitude.toFixed(5)}`,
-          },
-        });
-
-        graphics.push(graphic);
-      }
-
-      layer.addMany && layer.addMany(graphics);
-      try {
-        view.map && view.map.add && view.map.add(layer);
-      } catch {
-        try {
-          view.map && view.map.layers && view.map.layers.add && view.map.layers.add(layer);
-        } catch {}
-      }
-
-      resultsLayerRef.current = layer;
-    }
-
-    async function zoomToResults(locations: any[]) {
-      const view = viewRef.current;
-      if (!view || !locations || locations.length === 0) return;
-
-      // If there's only one location, center on it with a reasonable zoom level.
-      if (locations.length === 1) {
-        const first = locations[0];
-        try {
-          await view.goTo({ center: [first.lng, first.lat], zoom: 15 });
-        } catch {
-          try {
-            await view.goTo({ center: [first.lng, first.lat], zoom: 12 });
-          } catch {}
-        }
         return;
       }
 
-      let minLat = Number.POSITIVE_INFINITY;
-      let minLng = Number.POSITIVE_INFINITY;
-      let maxLat = Number.NEGATIVE_INFINITY;
-      let maxLng = Number.NEGATIVE_INFINITY;
-
-      for (const loc of locations) {
-        if (loc.lat < minLat) minLat = loc.lat;
-        if (loc.lat > maxLat) maxLat = loc.lat;
-        if (loc.lng < minLng) minLng = loc.lng;
-        if (loc.lng > maxLng) maxLng = loc.lng;
+      if (typeof result === "string") {
+        dataUrl = result;
+      } else if (result && typeof result.data === "string") {
+        dataUrl = result.data;
+      } else if (result && typeof (result as any).dataUrl === "string") {
+        dataUrl = (result as any).dataUrl;
+      } else if (result instanceof Blob || (result && result.data instanceof Blob)) {
+        const blob = result instanceof Blob ? result : result.data;
+        dataUrl = await new Promise<string>((res, rej) => {
+          const reader = new FileReader();
+          reader.onload = () => res(String(reader.result));
+          reader.onerror = (e) => rej(e);
+          reader.readAsDataURL(blob as Blob);
+        });
       }
 
-      // small padding if only one point in a dimension
-      if (minLat === maxLat) {
-        minLat -= 0.01;
-        maxLat += 0.01;
-      }
-      if (minLng === maxLng) {
-        minLng -= 0.01;
-        maxLng += 0.01;
+      if (!dataUrl) {
+        console.warn("[geotest] could not derive dataUrl from screenshot result for caption");
+        setLoading(false);
+        return;
       }
 
-      // Build an ArcGIS Extent object and ask the view to goTo it with padding.
+      try {
+        setImage && setImage(dataUrl);
+      } catch {}
+
+      try {
+        const res = await fetchCaption(dataUrl);
+        console.log("[geotest] caption service response:", res);
+        if (res && (res.caption || (res as any).input_caption)) {
+          const text = (res as any).caption || (res as any).input_caption;
+          setCaption(text);
+        } else {
+          setCaption("No caption returned");
+        }
+      } catch (e) {
+        console.warn("[geotest] caption request failed:", e);
+        setCaption("Caption request failed");
+      }
+    } catch (err) {
+      console.error("[geotest] caption flow failed:", err);
+    } finally {
+      try {
+        if (_clearedResultsLayer && results && results.length) {
+          try {
+            await addMarkersToMap(results);
+          } catch {}
+        }
+      } catch {}
+
+      try {
+        if (view && view.popup) {
+          if (typeof view.popup.visible !== "undefined") {
+            view.popup.visible = _popupWasOpen;
+          } else if (_popupWasOpen && typeof (view.popup as any).open === "function") {
+            try {
+              (view.popup as any).open();
+            } catch {}
+          }
+        }
+      } catch (e) {}
+
+      setLoading(false);
+    }
+  }
+
+  // ----- Search / results helpers -----
+  async function clearResultsLayer() {
+    const view = viewRef.current;
+    if (!view) return;
+    try {
+      if (resultsLayerRef.current) {
+        try {
+          // remove from map
+          view.map && view.map.remove && view.map.remove(resultsLayerRef.current);
+        } catch {}
+        try {
+          resultsLayerRef.current.removeAll && resultsLayerRef.current.removeAll();
+        } catch {}
+        resultsLayerRef.current = null;
+      }
+    } catch (e) {
+      console.warn("[geotest] clearResultsLayer failed", e);
+    }
+  }
+
+  async function addMarkersToMap(locations: any[]) {
+    const view = viewRef.current;
+    if (!view || !locations || locations.length === 0) return;
+
+    const [
+      GraphicsLayerModule,
+      GraphicModule,
+      PointModule,
+      SimpleMarkerSymbolModule,
+    ] = await Promise.all([
+      import("@arcgis/core/layers/GraphicsLayer"),
+      import("@arcgis/core/Graphic"),
+      import("@arcgis/core/geometry/Point"),
+      import("@arcgis/core/symbols/SimpleMarkerSymbol"),
+    ]);
+
+    const GraphicsLayer = GraphicsLayerModule.default;
+    const Graphic = (GraphicModule as any).default || (GraphicModule as any);
+    const Point = (PointModule as any).default || (PointModule as any);
+    const SimpleMarkerSymbol = (SimpleMarkerSymbolModule as any).default || (SimpleMarkerSymbolModule as any);
+
+    await clearResultsLayer();
+
+    const layer = new GraphicsLayer();
+    const graphics: any[] = [];
+
+    for (let i = 0; i < locations.length; i++) {
+      const loc = locations[i];
+      const latitude = loc.lat;
+      const longitude = loc.lng;
+
+      const point = new Point({
+        longitude,
+        latitude,
+      });
+
+      const symbol = new SimpleMarkerSymbol({
+        color: [0, 128, 255],
+        outline: { color: [255, 255, 255], width: 1 },
+        size: 10,
+      });
+
+      const graphic = new Graphic({
+        geometry: point,
+        symbol,
+        attributes: {
+          resultId: loc.id || i,
+          name: loc.name,
+          address: loc.address,
+          thumbnail: loc.thumbnail || null,
+        },
+        popupTemplate: {
+          title: loc.name || `Result ${i + 1}`,
+          content: loc.thumbnail
+            ? `<div>${loc.address ? loc.address : `${latitude.toFixed(5)}, ${longitude.toFixed(5)}`}<br/><img src="${loc.thumbnail}" style="max-width:160px;margin-top:6px;border-radius:6px;"/></div>`
+            : loc.address || `${latitude.toFixed(5)}, ${longitude.toFixed(5)}`,
+        },
+      });
+
+      graphics.push(graphic);
+    }
+
+    layer.addMany && layer.addMany(graphics);
+    try {
+      view.map && view.map.add && view.map.add(layer);
+    } catch {
+      try {
+        view.map && view.map.layers && view.map.layers.add && view.map.layers.add(layer);
+      } catch {}
+    }
+
+    resultsLayerRef.current = layer;
+
+    // If something is already selected, re-apply selection visuals
+    if (selectedId !== null) {
+      try {
+        await applySelectionVisual(selectedId);
+      } catch {}
+    }
+  }
+
+  async function applySelectionVisual(resultId: string | number | null) {
+    const view = viewRef.current;
+    if (!view || !resultsLayerRef.current) return;
+
+    const GraphicModule = await import("@arcgis/core/Graphic");
+    const PictureMarkerSymbolModule = await import("@arcgis/core/symbols/PictureMarkerSymbol");
+
+    const Graphic = (GraphicModule as any).default || (GraphicModule as any);
+    const PictureMarkerSymbol = (PictureMarkerSymbolModule as any).default || (PictureMarkerSymbolModule as any);
+
+    const layer = resultsLayerRef.current;
+    const graphics = layer.graphics ? layer.graphics.items || layer.graphics : [];
+
+    // Clear any existing overlay graphic we added previously
+    try {
+      if (overlayGraphicRef.current) {
+        try {
+          layer.remove && layer.remove(overlayGraphicRef.current);
+        } catch {}
+        overlayGraphicRef.current = null;
+      }
+    } catch {}
+
+    for (let i = 0; i < graphics.length; i++) {
+      const g = graphics[i];
+      const attr = g.attributes || {};
+      const id = attr.resultId;
+      if (id === resultId) {
+        // highlight this graphic by changing color/size (yellow)
+        try {
+          const SimpleMarkerSymbolModule = await import("@arcgis/core/symbols/SimpleMarkerSymbol");
+          const SimpleMarkerSymbol = (SimpleMarkerSymbolModule as any).default || (SimpleMarkerSymbolModule as any);
+          g.symbol = new SimpleMarkerSymbol({
+            style: "circle",
+            color: [255, 200, 0],
+            size: 14,
+            outline: { color: [255, 255, 255], width: 1 },
+          });
+        } catch (e) {
+          // keep existing symbol if we fail to change it
+          console.warn("[geotest] failed to set selected marker symbol", e);
+        }
+
+        // If this result has a thumbnail, add an overlay picture-marker slightly above the point
+        const thumb = attr.thumbnail;
+        if (thumb) {
+          try {
+            const picture = new PictureMarkerSymbol({
+              url: thumb,
+              width: "200px",
+              height: "200px",
+              // anchor/offset can be adjusted as needed
+              // yoffset to lift the image above the star marker
+              yoffset: -110,
+            });
+            const point = g.geometry;
+            const overlayGraphic = new Graphic({
+              geometry: point,
+              symbol: picture,
+              attributes: { overlayFor: id },
+            });
+            layer.add && layer.add(overlayGraphic);
+            overlayGraphicRef.current = overlayGraphic;
+          } catch (e) {
+            // If picture marker overlay fails (CORS / large image), open popup as fallback
+            try {
+              view.popup.open({
+                location: g.geometry,
+                title: attr.name || "Result",
+                content: attr.thumbnail ? `<img src="${attr.thumbnail}" style="max-width:320px;border-radius:6px;"/>` : attr.address || "",
+              });
+            } catch {}
+          }
+        } else {
+          // open popup when no thumbnail overlay available
+          try {
+            view.popup.open({
+              location: g.geometry,
+              title: attr.name || "Result",
+              content: attr.address || "",
+            });
+          } catch {}
+        }
+      } else {
+        // reset other graphics to default simple marker
+        try {
+          // recreate a small blue circle marker
+          const SimpleMarkerSymbolModule = await import("@arcgis/core/symbols/SimpleMarkerSymbol");
+          const SimpleMarkerSymbol = (SimpleMarkerSymbolModule as any).default || (SimpleMarkerSymbolModule as any);
+          g.symbol = new SimpleMarkerSymbol({
+            color: [0, 128, 255],
+            outline: { color: [255, 255, 255], width: 1 },
+            size: 10,
+          });
+        } catch {}
+      }
+    }
+  }
+
+  async function zoomToResults(locations: any[]) {
+    const view = viewRef.current;
+    if (!view || !locations || locations.length === 0) return;
+
+    if (locations.length === 1) {
+      const first = locations[0];
+      try {
+        await view.goTo({ center: [first.lng, first.lat], zoom: 15 }, { duration: 900, easing: "ease-in-out" });
+      } catch {
+        try {
+          await view.goTo({ center: [first.lng, first.lat], zoom: 12 }, { duration: 900, easing: "ease-in-out" });
+        } catch {}
+      }
+      return;
+    }
+
+    let minLat = Number.POSITIVE_INFINITY;
+    let minLng = Number.POSITIVE_INFINITY;
+    let maxLat = Number.NEGATIVE_INFINITY;
+    let maxLng = Number.NEGATIVE_INFINITY;
+
+    for (const loc of locations) {
+      if (loc.lat < minLat) minLat = loc.lat;
+      if (loc.lat > maxLat) maxLat = loc.lat;
+      if (loc.lng < minLng) minLng = loc.lng;
+      if (loc.lng > maxLng) maxLng = loc.lng;
+    }
+
+    if (minLat === maxLat) {
+      minLat -= 0.01;
+      maxLat += 0.01;
+    }
+    if (minLng === maxLng) {
+      minLng -= 0.01;
+      maxLng += 0.01;
+    }
+
       try {
         const ExtentModule = await import("@arcgis/core/geometry/Extent");
         const Extent = (ExtentModule as any).default || ExtentModule;
@@ -600,41 +659,41 @@ export default function MapDisplay() {
           ymax: maxLat,
           spatialReference: { wkid: 4326 },
         });
-        // view.goTo accepts an object with target + padding for a nicer framing
-        await view.goTo({ target: extentGeom, padding: 50 });
+        await view.goTo({ target: extentGeom, padding: 50 }, { duration: 900, easing: "ease-in-out" });
       } catch (e) {
-        // fallback: center on first result if Extent or goTo with extent fails
-        const first = locations[0];
-        try {
-          await view.goTo({ center: [first.lng, first.lat], zoom: 12 });
-        } catch {}
-      }
-    }
-
-    async function handleSearchSubmit() {
-      if (!query || !query.trim()) return;
-      const view = viewRef.current;
-      setResultsLoading(true);
+      const first = locations[0];
       try {
-        // use searchLocations helper from lib/actions
-        const res = await searchLocations(query.trim(), null);
-        const locs = res.locations || [];
-        console.log("[geotest] search results:", locs);
-        setResults(locs);
-        setResultsOpen(true);
-        await addMarkersToMap(locs);
-        if (locs.length) {
-          await zoomToResults(locs);
-        }
-      } catch (e) {
-        // eslint-disable-next-line no-console
-        console.error("[geotest] search failed:", e);
-        setResults([]);
-        await clearResultsLayer();
-      } finally {
-        setResultsLoading(false);
-      }
+        await view.goTo({ center: [first.lng, first.lat], zoom: 12 }, { duration: 900, easing: "ease-in-out" });
+      } catch {}
     }
+  }
+
+  async function handleSearchSubmit() {
+    if (!query || !query.trim()) return;
+    const view = viewRef.current;
+    setResultsLoading(true);
+    try {
+      const res = await searchLocations(query.trim(), null);
+      const locs = res.locations || [];
+      console.log("[geotest] search results:", locs);
+      setResults(locs);
+      setResultsOpen(true);
+      await addMarkersToMap(locs);
+      if (locs.length) {
+        await zoomToResults(locs);
+      } else {
+        // clear selection if no results
+        setSelectedId(null);
+      }
+    } catch (e) {
+      console.error("[geotest] search failed:", e);
+      setResults([]);
+      await clearResultsLayer();
+      setSelectedId(null);
+    } finally {
+      setResultsLoading(false);
+    }
+  }
 
   return (
     <div style={{ width: "100%", height: "100%", position: "relative" }}>
@@ -740,7 +799,8 @@ export default function MapDisplay() {
         </div>
       )}
 
-      {resultsOpen && (
+      {/* Only show results panel when there are results */}
+      {results.length > 0 && resultsOpen && (
         <div
           style={{
             position: "absolute",
@@ -770,52 +830,117 @@ export default function MapDisplay() {
           </div>
 
           <div style={{ overflowY: "auto", flex: 1 }}>
-            {results.length === 0 ? (
-              <div style={{ padding: 12, color: "rgba(219,231,255,0.6)" }}>No results</div>
-            ) : (
-              results.map((r, idx) => (
-                <div
-                  key={r.id || idx}
-                  style={{
-                    display: "flex",
-                    gap: 10,
-                    alignItems: "center",
-                    padding: "10px 12px",
-                    borderBottom: "1px solid rgba(255,255,255,0.02)",
-                    cursor: "pointer",
-                    transition: "background 120ms ease",
-                  }}
-                  onMouseEnter={(e) => (e.currentTarget.style.background = "rgba(255,255,255,0.02)")}
-                  onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
-                  onClick={async () => {
+            {results.map((r, idx) => (
+              <div
+                key={r.id || idx}
+                style={{
+                  display: "flex",
+                  gap: 10,
+                  alignItems: "center",
+                  padding: "10px 12px",
+                  borderBottom: "1px solid rgba(255,255,255,0.02)",
+                  cursor: "pointer",
+                  transition: "background 120ms ease",
+                }}
+                onMouseEnter={(e) => (e.currentTarget.style.background = "rgba(255,255,255,0.02)")}
+                onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
+                onClick={async () => {
+                  try {
+                    const view = viewRef.current;
+                    if (!view) return;
+
+                    // smooth staged movement: zoom out -> pan -> zoom in (extended animation)
+                    const targetZoom = 17;
+                    const currentZoom = typeof view.zoom === "number" ? view.zoom : (view?.camera && view.camera.zoom) || targetZoom;
+
                     try {
-                      const view = viewRef.current;
-                      if (view) {
-                        await view.goTo({ center: [r.lng, r.lat], zoom: 15 });
-                        try {
-                          view.popup.open({
-                            location: { longitude: r.lng, latitude: r.lat },
-                            title: r.name,
-                            content: r.address || `${r.lat.toFixed(5)}, ${r.lng.toFixed(5)}`,
-                          });
-                        } catch {}
+                      if (currentZoom >= targetZoom) {
+                        // zoom out first to provide a visible transition when already zoomed in
+                        const zoomOut = Math.max(6, Math.floor(currentZoom) - 8);
+                        await view.goTo({ zoom: zoomOut }, { duration: 1800, easing: "ease-in-out" });
+                        // small pause to make staging feel deliberate
+                        await new Promise((res) => setTimeout(res, 150));
                       }
                     } catch (e) {
-                      // eslint-disable-next-line no-console
-                      console.warn("[geotest] result click failed", e);
+                      console.warn("[geotest] initial zoom-out failed", e);
                     }
-                  }}
-                >
+
+                    // pan to target center more noticeably
+                    try {
+                      await view.goTo({ center: [r.lng, r.lat] }, { duration: 2200, easing: "ease-in-out" });
+                      await new Promise((res) => setTimeout(res, 150));
+                    } catch (e) {
+                      console.warn("[geotest] pan to target failed", e);
+                    }
+
+                    // then smoothly zoom back in to target level
+                    try {
+                      await view.goTo({ zoom: targetZoom }, { duration: 2200, easing: "ease-in-out" });
+                    } catch (e) {
+                      console.warn("[geotest] final zoom-in failed", e);
+                    }
+
+                    // mark selected result and apply visuals (highlight + overlay)
+                    const id = r.id || idx;
+                    setSelectedId(id);
+                    try {
+                      // apply selection visual which will attempt to overlay thumbnail if present
+                      await applySelectionVisual(id);
+                    } catch (e) {
+                      console.warn("[geotest] applySelectionVisual failed", e);
+                    }
+
+                    // If thumbnail is present but overlay failed, ensure popup shows image as fallback
+                    try {
+                      // small delay to allow picture marker to render if used
+                      await new Promise((res) => setTimeout(res, 120));
+                      // open popup if overlay isn't present
+                      const layer = resultsLayerRef.current;
+                      const graphics = layer ? (layer.graphics ? layer.graphics.items || layer.graphics : []) : [];
+                      let found = null;
+                      for (let i = 0; i < graphics.length; i++) {
+                        const g = graphics[i];
+                        if (g.attributes && g.attributes.resultId === id) {
+                          found = g;
+                          break;
+                        }
+                      }
+                      if (found) {
+                        // if overlayGraphicRef is not set, open popup as accessible fallback
+                        if (!overlayGraphicRef.current) {
+                          view.popup.open({
+                            location: found.geometry,
+                            title: found.attributes.name || "Result",
+                            content: found.attributes.thumbnail ? `<img src="${found.attributes.thumbnail}" style="max-width:320px;border-radius:6px;"/>` : found.attributes.address || "",
+                          });
+                        }
+                      }
+                    } catch (e) {}
+                  } catch (e) {
+                    console.warn("[geotest] result click failed", e);
+                  }
+                }}
+              >
+                {/* thumbnail (if available) or numeric badge */}
+                {r.thumbnail ? (
+                  <div style={{ width: 34, height: 34, borderRadius: 6, overflow: "hidden", background: "rgba(255,255,255,0.04)" }}>
+                    <img src={r.thumbnail} alt={`thumb-${idx}`} style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }} />
+                  </div>
+                ) : (
                   <div style={{ width: 34, height: 34, borderRadius: 6, background: "rgba(255,255,255,0.06)", color: "#dbe7ff", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 700 }}>
                     {idx + 1}
                   </div>
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: 13, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", color: "#e6f0ff" }}>{r.name}</div>
-                    <div style={{ fontSize: 12, color: "rgba(219,231,255,0.7)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{r.address}</div>
-                  </div>
+                )}
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 13, fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", color: "#e6f0ff" }}>{r.name}</div>
+                  <div style={{ fontSize: 12, color: "rgba(219,231,255,0.7)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{r.address}</div>
                 </div>
-              ))
-            )}
+                {/* show star badge for selected item in list */}
+                <div style={{ width: 28, height: 28, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                  {selectedId === (r.id || idx) ? <img src={STAR_SVG_DATA_URL} style={{ width: 22, height: 22 }} alt="selected" /> : null}
+                </div>
+              </div>
+            ))}
           </div>
         </div>
       )}

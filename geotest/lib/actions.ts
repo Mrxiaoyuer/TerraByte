@@ -2,6 +2,7 @@ export type QueryResponse = {
   lat_longs: [number, number][];
   input_caption: string;
   captions: string[];
+  thumbnails?: (string | null)[];
 };
 
 async function fetchLatLongs(query: string, image: string | null): Promise<QueryResponse> {
@@ -49,6 +50,7 @@ export async function searchLocations(query: string, image: string | null) {
       lng,
       distance: 0,
       caption: (data.captions && data.captions[i]) ? (data.captions[i].charAt(0).toUpperCase() + data.captions[i].slice(1)) : "",
+      thumbnail: (data.thumbnails && data.thumbnails[i]) ? data.thumbnails[i] : null,
       type: "",
     };
   });
@@ -58,7 +60,7 @@ export async function searchLocations(query: string, image: string | null) {
 
 export async function fetchCaption(image: string) {
   try {
-    const response = await fetch("http://127.0.0.1:8000/process_caption", {
+    const response = await fetch("http://127.0.0.1:8001/process_caption", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ image }),

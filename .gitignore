@@ -1,5 +1,6 @@
 # CLINE dependencies
 memory-bank/
+doc/
 
 # Node dependencies
 node_modules/
@@ -148,3 +149,19 @@ Thumbs.db
 #   to unstage all files, or:
 #     git rm -r --cached path/to/file-or-folder
 #   to remove committed files from the index while keeping them locally.
+#
+# -------------------------
+# Project-specific additions
+# -------------------------
+# Ignore user Azure config if accidentally placed in the repo root or project:
+# This is defensive: the canonical place is the user's home (~/.azure/), but if a local copy
+# is created in the repository, this prevents accidental commits.
+/.azure/
+# Explicitly ignore any user-level Azure config file if placed in repo
+/.azure/gpt-4o-mini.config
+
+# Ignore local run scripts or temp files you might create during testing
+local-scripts/
+*.localenv
+
+# End of .gitignore

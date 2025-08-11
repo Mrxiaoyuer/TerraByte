@@ -3,9 +3,19 @@ from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 import logging
 import base64
-from typing import List, Optional
+import os
+import sys
+import json
+import asyncio
+from typing import Optional
 
-app = FastAPI(title="Caption Service (template)")
+# Ensure microservices/common is importable when running via uvicorn from this directory
+# Add the parent directory (microservices) to sys.path so we can import common.azure_client
+sys.path.append(os.path.dirname(os.path.dirname(__file__)))
+
+from common.azure_client import build_azure_client, create_chat_completion, parse_json_or_text
+
+app = FastAPI(title="Caption Service (Azure-backed)")
 
 # Allow CORS from localhost:3000 (adjust if different)
 app.add_middleware(
@@ -28,75 +38,119 @@ class CaptionResponse(BaseModel):
     caption: str
 
 
-class QueryRequest(BaseModel):
-    query: Optional[str] = None
-    b64_image: Optional[str] = None
-
-
-class QueryResponseModel(BaseModel):
-    lat_longs: List[List[float]]
-    input_caption: str
-    captions: List[str]
-
-
 def dummy_infer_from_b64(data_url: str) -> str:
     """
-    Placeholder inference function.
-
-    - Expects a data URL like "data:image/png;base64,....".
-    - Currently does not perform real model inference.
-    - Replace the body of this function with actual decoding + model inference code.
+    Deterministic fallback caption for development when Azure credentials are not provided
+    or the Azure call fails.
     """
     try:
         header, b64 = data_url.split(",", 1)
         # Optionally decode for future use:
         # image_bytes = base64.b64decode(b64)
-        # e.g., load with PIL.Image.open(io.BytesIO(image_bytes)) and run model
-        _ = b64[:32]  # no-op to reference variable
+        _ = b64[:32]  # reference variable so linter won't complain
     except Exception:
         logger.warning("Invalid data URL received in dummy_infer_from_b64")
-    # Deterministic placeholder caption for testing
     return "A small satellite view showing buildings and streets (placeholder caption)."
+
+
+
+
+async def call_azure_caption(client, data_url: str) -> str:
+    """
+    Use the shared create_chat_completion helper to request a caption.
+    Returns the parsed caption string (or raises).
+    """
+    system_message = {
+        "role": "system",
+        "content": "You are a concise assistant that produces a single short factual caption describing the contents of a satellite or aerial image. Respond with JSON exactly like: {\"caption\":\"short caption here\"} whenever possible. Keep caption <= 48 words."
+    }
+
+    user_message = {
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "Generate a caption for this image."},
+            {"type": "image_url", "image_url": {"url": data_url}},
+        ],
+    }
+
+    messages = [system_message, user_message]
+
+    try:
+        raw_text = await create_chat_completion(client, messages, max_tokens=200, temperature=0.2)
+        return parse_caption_text(raw_text)
+    except Exception as e:
+        logger.exception("Azure caption call failed via shared helper: %s", e)
+        raise
+
+
+def parse_caption_text(text: str) -> str:
+    """
+    Robust parsing of the model's returned text. Attempts JSON parse first,
+    then falls back to extracting a short line of text.
+    """
+    if not text:
+        return ""
+
+    # If text looks like JSON somewhere in the output, attempt to find and parse it.
+    text = text.strip()
+    # Try direct json parse
+    try:
+        obj = json.loads(text)
+        if isinstance(obj, dict) and "caption" in obj:
+            cap = obj.get("caption") or ""
+            return str(cap).strip()
+    except Exception:
+        pass
+
+    # If the model returned additional surrounding text, try to extract JSON substring
+    try:
+        start = text.index("{")
+        end = text.rindex("}")
+        maybe = text[start : end + 1]
+        obj = json.loads(maybe)
+        if isinstance(obj, dict) and "caption" in obj:
+            cap = obj.get("caption") or ""
+            return str(cap).strip()
+    except Exception:
+        pass
+
+    # Fallback: return first non-empty line, trimmed and limited to a reasonable length
+    first_line = text.splitlines()[0].strip()
+    if first_line:
+        return first_line[:400].strip()
+    return text[:400].strip()
 
 
 @app.post("/process_caption", response_model=CaptionResponse)
 async def process_caption(req: CaptionRequest):
+    """
+    Accepts a data URL image and returns a short caption.
+
+    Behavior:
+      - If Azure OpenAI SDK and credentials are available, call the Azure deployment (gpt-4o-mini by default).
+      - Attempt to parse JSON {"caption":"..."} from the model output.
+      - If Azure is not configured or the call fails, fall back to the deterministic dummy_infer_from_b64.
+    """
     if not req.image:
         raise HTTPException(status_code=400, detail="Missing image in request")
 
-    try:
+    client = build_azure_client()
+    if client is None:
+        # No Azure client available — use fallback
+        logger.info("Azure client not available; using dummy fallback caption.")
         caption = dummy_infer_from_b64(req.image)
         return {"caption": caption}
+
+
+    try:
+        caption = await call_azure_caption(client, req.image)
+        # ensure non-empty caption
+        if not caption:
+            logger.warning("Azure returned empty caption; falling back to dummy caption.")
+            caption = dummy_infer_from_b64(req.image)
+        return {"caption": caption}
     except Exception as e:
-        logger.exception("Inference failed")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post("/process_query", response_model=QueryResponseModel)
-async def process_query(req: QueryRequest):
-    # This is a stubbed response for development/testing
-    logger.info("Received process_query request: query=%s, image=%s", req.query, bool(req.b64_image))
-
-    # Generate 10 deterministic dummy coordinates near a default center (New York City).
-    # This keeps behavior predictable for development and UI testing.
-    center_lat = 40.7128
-    center_lon = -74.0060
-
-    lat_longs = []
-    captions = []
-    for i in range(10):
-        # Create a small grid of points around the center
-        row = i // 5
-        col = i % 5
-        lat_offset = (row - 1) * 0.0125  # rows: -0.0125, 0, 0.0125, etc.
-        lon_offset = (col - 2) * 0.02    # cols: -0.04, -0.02, 0, 0.02, 0.04
-        lat = round(center_lat + lat_offset + (i * 0.0001), 6)
-        lon = round(center_lon + lon_offset + (i * 0.0001), 6)
-        lat_longs.append([lat, lon])
-        captions.append(f"Dummy location {i + 1}")
-
-    return {
-        "lat_longs": lat_longs,
-        "input_caption": req.query or "",
-        "captions": captions,
-    }
+        logger.exception("Caption generation failed; returning fallback caption. Error: %s", e)
+        # On failure, return fallback caption instead of error to keep frontend robust.
+        caption = dummy_infer_from_b64(req.image)
+        return {"caption": caption}
