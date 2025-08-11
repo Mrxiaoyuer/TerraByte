@@ -417,9 +417,103 @@ export default function MapDisplay() {
     const view = viewRef.current;
     if (!view) return;
     try {
+      // Robust removal:
+      // 1) Remove layers that match our id/title marker ("geotest-results")
+      // 2) For all layers, remove any graphics that have attributes.resultId
+      // 3) Also clear view.graphics (global graphics) of any resultId-marked graphics
+      // 4) Clear refs (resultsLayerRef and overlayGraphicRef)
+      try {
+        const layersCollection = view.map && view.map.layers;
+        const allLayers: any[] = [];
+
+        if (layersCollection) {
+          const items = layersCollection.items || layersCollection;
+          if (Array.isArray(items)) {
+            allLayers.push(...items.slice());
+          } else if (typeof layersCollection.forEach === "function") {
+            layersCollection.forEach((l: any) => {
+              allLayers.push(l);
+            });
+          } else {
+            // fallback if layersCollection itself is a single layer
+            allLayers.push(layersCollection);
+          }
+        }
+
+        // Helper: remove a layer safely
+        const safeRemoveLayer = (layer: any) => {
+          try {
+            if (!layer) return;
+            // If the layer has id/title matching our marker, remove the whole layer
+            if (layer.id === "geotest-results" || layer.title === "geotest-results") {
+              try {
+                layersCollection && layersCollection.remove && layersCollection.remove(layer);
+              } catch {}
+              try {
+                view.map && view.map.remove && view.map.remove(layer);
+              } catch {}
+              try {
+                layer.removeAll && layer.removeAll();
+              } catch {}
+              return;
+            }
+
+            // Otherwise, try to remove any graphics inside the layer that were added by our search flow
+            const gfxs = layer.graphics && (layer.graphics.items || layer.graphics);
+            if (Array.isArray(gfxs) && gfxs.length) {
+              // iterate copy to avoid mutation issues
+              for (const g of gfxs.slice()) {
+                try {
+                  const attr = g && g.attributes;
+                  if (attr && typeof attr.resultId !== "undefined") {
+                    try {
+                      layer.remove && layer.remove(g);
+                    } catch {}
+                    try {
+                      layer.graphics && layer.graphics.remove && layer.graphics.remove(g);
+                    } catch {}
+                    try {
+                      g.remove && g.remove();
+                    } catch {}
+                  }
+                } catch {}
+              }
+            }
+          } catch {}
+        };
+
+        for (const l of allLayers) {
+          safeRemoveLayer(l);
+        }
+      } catch (e) {
+        // ignore errors during best-effort removal
+      }
+
+      // Also remove graphics from view.graphics (global graphics collection) that match resultId
+      try {
+        const viewGraphics = view.graphics && (view.graphics.items || view.graphics);
+        if (Array.isArray(viewGraphics) && viewGraphics.length) {
+          for (const g of viewGraphics.slice()) {
+            try {
+              const attr = g && g.attributes;
+              if (attr && typeof attr.resultId !== "undefined") {
+                try {
+                  view.graphics && view.graphics.remove && view.graphics.remove(g);
+                } catch {}
+                try {
+                  g.remove && g.remove();
+                } catch {}
+              }
+            } catch {}
+          }
+        }
+      } catch (e) {
+        // ignore
+      }
+
+      // Also remove/clear the layer referenced by our ref (if present)
       if (resultsLayerRef.current) {
         try {
-          // remove from map
           view.map && view.map.remove && view.map.remove(resultsLayerRef.current);
         } catch {}
         try {
@@ -427,6 +521,23 @@ export default function MapDisplay() {
         } catch {}
         resultsLayerRef.current = null;
       }
+
+      // Remove overlay graphic if present
+      try {
+        if (overlayGraphicRef.current) {
+          try {
+            // try remove from layer if possible
+            if (resultsLayerRef.current && resultsLayerRef.current.remove) {
+              try {
+                resultsLayerRef.current.remove(overlayGraphicRef.current);
+              } catch {}
+            }
+            // try removing from view.graphics as a fallback
+            view.graphics && view.graphics.remove && view.graphics.remove(overlayGraphicRef.current);
+          } catch {}
+          overlayGraphicRef.current = null;
+        }
+      } catch (e) {}
     } catch (e) {
       console.warn("[geotest] clearResultsLayer failed", e);
     }
@@ -456,6 +567,11 @@ export default function MapDisplay() {
     await clearResultsLayer();
 
     const layer = new GraphicsLayer();
+    // mark this layer so it can be found and removed reliably later
+    try {
+      layer.id = "geotest-results";
+      layer.title = "geotest-results";
+    } catch {}
     const graphics: any[] = [];
 
     for (let i = 0; i < locations.length; i++) {

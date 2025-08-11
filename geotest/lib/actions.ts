@@ -5,17 +5,60 @@ export type QueryResponse = {
   thumbnails?: (string | null)[];
 };
 
+/**
+ * Resolve backend base URLs depending on runtime environment.
+ * - When running the app locally (localhost / 127.0.0.1) we want the client
+ *   to call the microservices directly on their mapped host ports so requests
+ *   actually reach the FastAPI containers.
+ * - When running behind the reverse proxy (Caddy / terrabyte.live) we keep
+ *   relative paths so the proxy can route `/api/...` to the correct service.
+ */
+function resolveBackends() {
+  if (typeof window === "undefined") {
+    // Server-side / build-time: keep relative paths (Next.js server will proxy or serve)
+    return {
+      processQueryBase: "",
+      processCaptionBase: "",
+    };
+  }
+
+  const host = window.location.hostname;
+  const isLocalhost = host === "localhost" || host === "127.0.0.1";
+
+  if (isLocalhost) {
+    // When developing locally we know Compose maps:
+    // - process_query -> host:8000
+    // - caption_service -> host:8001
+    return {
+      processQueryBase: "http://127.0.0.1:8000",
+      processCaptionBase: "http://127.0.0.1:8001",
+    };
+  }
+
+  // Default: use relative /api paths so a reverse proxy (Caddy) can route them.
+  return {
+    processQueryBase: "",
+    processCaptionBase: "",
+  };
+}
+
 async function fetchLatLongs(query: string, image: string | null): Promise<QueryResponse> {
   try {
+    const { processQueryBase } = resolveBackends();
+
+    // Build endpoint respecting whether we want absolute host:port (local dev)
+    // or a relative path that will be forwarded by the proxy in production.
+    const endpoint = processQueryBase ? `${processQueryBase}/process_query` : "/api/process_query";
+
     let response;
     if (image) {
-      response = await fetch("http://127.0.0.1:8000/process_query", {
+      response = await fetch(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ query, b64_image: image }),
       });
     } else {
-      response = await fetch("http://127.0.0.1:8000/process_query", {
+      response = await fetch(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ query }),
@@ -60,7 +103,10 @@ export async function searchLocations(query: string, image: string | null) {
 
 export async function fetchCaption(image: string) {
   try {
-    const response = await fetch("http://127.0.0.1:8001/process_caption", {
+    const { processCaptionBase } = resolveBackends();
+    const endpoint = processCaptionBase ? `${processCaptionBase}/process_caption` : "/api/process_caption";
+
+    const response = await fetch(endpoint, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ image }),

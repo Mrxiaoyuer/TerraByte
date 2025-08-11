@@ -1,0 +1,1 @@
+(pkill -f "uvicorn process_query.main" || true) && (pkill -f "uvicorn caption_service.main" || true) && (pkill -f "uvicorn" || true); sleep 1; ps aux | grep -E 'uvicorn|process_query|caption_service' | grep -v grep || true

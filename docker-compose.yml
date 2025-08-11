@@ -1,0 +1,73 @@
+version: "3.8"
+
+services:
+  web:
+    build:
+      context: ./geotest
+      dockerfile: Dockerfile
+    image: terrabyte_web:latest
+    restart: unless-stopped
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+    ports:
+      - "3000:3000" # optional direct mapping for debugging; Caddy will route 80/443 to this
+    volumes:
+      - ./geotest/public/uploads:/app/public/uploads
+    networks:
+      - terrabyte_net
+
+  caption_service:
+    build:
+      context: ./geotest/microservices
+      dockerfile: caption_service/Dockerfile
+    image: terrabyte_caption:latest
+    restart: unless-stopped
+    environment:
+      - PORT=8001
+      - PYTHONUNBUFFERED=1
+    ports:
+      - "8001:8001"
+    volumes:
+      - ./geotest/microservices:/app
+      - ./geotest/public/uploads:/app/../../public/uploads  # keep uploads in repo public folder
+      - /home/frank/.azure:/root/.azure
+    networks:
+      - terrabyte_net
+
+  process_query:
+    build:
+      context: ./geotest/microservices
+      dockerfile: process_query/Dockerfile
+    image: terrabyte_process_query:latest
+    restart: unless-stopped
+    environment:
+      - PORT=8000
+      - PYTHONUNBUFFERED=1
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./geotest/microservices:/app
+    networks:
+      - terrabyte_net
+
+  caddy:
+    image: caddy:2.7.4
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - terrabyte_net
+
+volumes:
+  caddy_data:
+  caddy_config:
+
+networks:
+  terrabyte_net:
+    driver: bridge

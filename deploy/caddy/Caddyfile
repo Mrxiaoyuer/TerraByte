@@ -1,0 +1,40 @@
+# Caddyfile for terrabyte.live
+# Ensure your DNS A record for terrabyte.live points to this server's public IP before starting.
+# Replace the email below with a real contact for ACME notifications.
+
+terrabyte.live {
+    # Automatic HTTPS (Let's Encrypt) - replace with your email
+    tls admin@terrabyte.live
+
+    # Proxy caption processing endpoint to the caption service
+    handle /api/process_caption* {
+        uri strip_prefix /api
+        reverse_proxy caption_service:8001
+    }
+
+    # Proxy process_query endpoint to the process_query service
+    handle /api/process_query* {
+        uri strip_prefix /api
+        reverse_proxy process_query:8000
+    }
+
+    # Static uploads (served by Next.js app at /uploads)
+    handle_path /uploads/* {
+        reverse_proxy web:3000
+    }
+
+    # Fallback: forward all other traffic to the Next.js app
+    handle {
+        reverse_proxy web:3000 {
+            header_up X-Real-IP {remote}
+            header_up X-Forwarded-For {remote}
+            header_up X-Forwarded-Proto {scheme}
+        }
+    }
+
+    # Optional: enable access logging (goes to stdout and will be visible in docker logs)
+    log {
+        output stdout
+        level INFO
+    }
+}

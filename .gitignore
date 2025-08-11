@@ -164,4 +164,27 @@ Thumbs.db
 local-scripts/
 *.localenv
 
+# -------------------------
+# Local / runtime artifacts to explicitly ignore (project-specific)
+# -------------------------
+
+# Local docker / compose helper logs created by helper scripts
+docker_logs.txt
+
+# Local helper/service logs created during development (uvicorn, nohup, etc.)
+*.log
+geotest/microservices/*.log
+geotest/*.log
+
+# Local dev-only scripts or temp files
+local-scripts/
+*.localenv
+
+# Caddy runtime files (if ever written to repo paths during debugging)
+caddy_data/
+caddy_config/
+
+# Optional: VSCode workspace settings (sometimes shared accidentally)
+.vscode/*.code-workspace
+
 # End of .gitignore
