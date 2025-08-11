@@ -83,6 +83,35 @@ Quick start (setup & run)
      export PYTHONPATH="$PWD/.."  # optional if you have package import issues
      uvicorn main:app --reload --port 8001
 
+Developer scripts (convenience)
+- start_docker_compose.sh (repo root)
+  - Purpose: builds and starts the full docker-compose stack (web, caption_service, process_query, caddy).
+  - Usage:
+      chmod +x start_docker_compose.sh
+      ./start_docker_compose.sh
+  - Notes:
+    - The script auto-detects whether your system uses `docker compose` or `docker-compose`.
+    - It will prompt to use sudo if your user cannot access the Docker socket.
+    - Recent compose logs are saved to docker_logs.txt in the repo root for quick diagnostics.
+
+- geotest/start_microservices.sh
+  - Purpose: convenience script to run both microservices locally (uvicorn) for development without docker.
+  - Usage:
+      cd geotest
+      chmod +x start_microservices.sh
+      ./start_microservices.sh
+  - Notes:
+    - The script runs uvicorn for caption_service and process_query and writes logs to geotest/microservices/*.log.
+    - If you see ModuleNotFoundError for `common`, either set PYTHONPATH to include geotest/microservices (example below) or request the package-layout refactor recorded in the memory bank.
+
+Quick tip — PYTHONPATH workaround for local microservices
+- If you get import errors when running microservices with uvicorn, set PYTHONPATH before starting:
+    cd geotest/microservices
+    export PYTHONPATH="$PWD:$PYTHONPATH"
+    # then start the caption service
+    cd caption_service
+    uvicorn main:app --reload --port 8001
+
 Scripts available (from package.json)
 - `dev` — run Next.js in development mode
 - `build` — build production artifacts
